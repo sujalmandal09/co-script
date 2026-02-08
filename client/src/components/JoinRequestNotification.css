@@ -1,0 +1,152 @@
+/* Join Request Notification Styles */
+.join-requests-container {
+    position: fixed;
+    top: 80px;
+    right: 20px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 360px;
+    width: 100%;
+}
+
+.join-request-notification {
+    background: linear-gradient(135deg, rgba(30, 41, 59, 0.95) 0%, rgba(15, 23, 42, 0.95) 100%);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(148, 163, 184, 0.15);
+    border-radius: 16px;
+    padding: 16px;
+    box-shadow:
+        0 20px 40px -15px rgba(0, 0, 0, 0.5),
+        0 0 0 1px rgba(148, 163, 184, 0.05);
+    animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateX(100px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+.notification-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.notification-icon {
+    color: #6366f1;
+    font-size: 20px;
+}
+
+.notification-title {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #94a3b8;
+}
+
+.notification-body {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.requester-avatar {
+    width: 44px;
+    height: 44px;
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    color: white;
+}
+
+.requester-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.requester-name {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #f1f5f9;
+}
+
+.requester-message {
+    font-size: 0.8rem;
+    color: #64748b;
+}
+
+.notification-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.action-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 16px;
+    border-radius: 10px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border: none;
+}
+
+.action-btn span {
+    font-size: 18px;
+}
+
+/* Accept Button - Whitish Blue */
+.accept-btn {
+    background: linear-gradient(135deg, #94a3b8 0%, #60a5fa 100%);
+    color: #0f172a;
+}
+
+.accept-btn:hover {
+    background: linear-gradient(135deg, #a8b4c4 0%, #7bb3fb 100%);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px -5px rgba(96, 165, 250, 0.4);
+}
+
+/* Decline Button - Red */
+.decline-btn {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.decline-btn:hover {
+    background: rgba(239, 68, 68, 0.25);
+    transform: translateY(-1px);
+}
+
+/* Responsive */
+@media (max-width: 480px) {
+    .join-requests-container {
+        top: auto;
+        bottom: 20px;
+        left: 10px;
+        right: 10px;
+        max-width: none;
+    }
+}
