@@ -204,9 +204,14 @@ export default function EditorPage() {
   }, [roomId, activeFile]);
 
   const handleFileSwitch = (fileName) => {
+    const file = files[fileName];
+    // Guard: don't switch if file doesn't exist or is a folder
+    if (!file || file.isFolder) {
+      return;
+    }
     setActiveFile(fileName);
-    setLanguage(files[fileName].language);
-    setCode(files[fileName].content);
+    setLanguage(file.language || 'plaintext');
+    setCode(file.content || '');
     // In a real multi-file system, we would sync file switch too. 
     // For now, this updates the local editor view.
   };
@@ -368,6 +373,10 @@ export default function EditorPage() {
     return langMap[ext] || 'plaintext';
   };
 
+  // Folders/files to skip for performance
+  const EXCLUDED_FOLDERS = ['node_modules', '.git', '.next', 'dist', 'build', '.cache', 'coverage'];
+  const EXCLUDED_FILES = ['.DS_Store', 'Thumbs.db'];
+
   // Helper function to recursively read a directory
   const readDirectoryRecursively = async (dirHandle, parentPath, filesMap) => {
     const folderPath = parentPath ? `${parentPath}${dirHandle.name}/` : `${dirHandle.name}/`;
@@ -381,6 +390,13 @@ export default function EditorPage() {
 
     // Iterate through all entries in the directory
     for await (const entry of dirHandle.values()) {
+      // Skip hidden files/folders (starting with .)
+      if (entry.name.startsWith('.') && entry.name !== '.env') continue;
+      // Skip excluded folders
+      if (entry.kind === 'directory' && EXCLUDED_FOLDERS.includes(entry.name)) continue;
+      // Skip excluded files
+      if (entry.kind === 'file' && EXCLUDED_FILES.includes(entry.name)) continue;
+
       if (entry.kind === 'directory') {
         // Recursively read subdirectory
         await readDirectoryRecursively(entry, folderPath, filesMap);
@@ -741,19 +757,22 @@ export default function EditorPage() {
           {/* Editor Tabs / Breadcrumbs */}
           <div className="flex items-center bg-sidebar-bg dark:bg-slate-950 h-9 border-b border-border-main dark:border-slate-800">
             <div className="flex h-full">
-              {Object.values(files).map(file => (
-                <div
-                  key={file.name}
-                  onClick={() => handleFileSwitch(file.name)}
-                  className={`flex items-center gap-2 px-3 border-r border-border-main dark:border-slate-800 text-[11px] cursor-pointer transition-colors ${activeFile === file.name ? 'bg-white dark:bg-slate-900 font-semibold text-slate-700 dark:text-slate-200 border-t-2 border-t-primary' : 'font-medium text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
-                >
-                  <span className={`material-icons-round text-[14px] ${activeFile === file.name ? 'text-primary' : ''}`}>description</span>
-                  {file.name}
-                  {activeFile === file.name && (
-                    <span className="material-icons-round text-[14px] cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 rounded p-0.5 ml-1">close</span>
-                  )}
-                </div>
-              ))}
+              {Object.entries(files)
+                .filter(([path, file]) => !file.isFolder) // Only show files, not folders
+                .slice(0, 10) // Limit to 10 tabs to prevent overflow
+                .map(([path, file]) => (
+                  <div
+                    key={path}
+                    onClick={() => handleFileSwitch(path)}
+                    className={`flex items-center gap-2 px-3 border-r border-border-main dark:border-slate-800 text-[11px] cursor-pointer transition-colors ${activeFile === path ? 'bg-white dark:bg-slate-900 font-semibold text-slate-700 dark:text-slate-200 border-t-2 border-t-primary' : 'font-medium text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                  >
+                    <span className={`material-icons-round text-[14px] ${activeFile === path ? 'text-primary' : ''}`}>description</span>
+                    {file.name}
+                    {activeFile === path && (
+                      <span className="material-icons-round text-[14px] cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 rounded p-0.5 ml-1">close</span>
+                    )}
+                  </div>
+                ))}
             </div>
             <div className="flex-1 px-4 flex items-center justify-between">
               <div className="flex items-center gap-2 text-[10px] text-slate-400 font-mono">
