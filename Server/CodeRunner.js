@@ -25,6 +25,12 @@ const LANGUAGES = {
         },
         timeout: 15000
     },
+    c: {
+        extension: 'c',
+        compile: (file, dir) => `gcc "${file}" -o "${path.join(dir, 'program')}"`,
+        run: (file, dir) => `"${path.join(dir, 'program')}"`,
+        timeout: 15000
+    },
     cpp: {
         extension: 'cpp',
         compile: (file, dir) => `g++ "${file}" -o "${path.join(dir, 'program')}"`,

@@ -7,6 +7,10 @@ import { useTheme } from "./contexts/ThemeContext";
 import JoinRequestNotification from "./components/JoinRequestNotification";
 import InviteModal from "./components/InviteModal";
 import SettingsModal from "./components/SettingsModal";
+import EnhancedTerminal from "./components/EnhancedTerminal";
+import TerminalTabs from "./components/TerminalTabs";
+import WorkspaceExplorer from "./components/WorkspaceExplorer";
+import ContextMenu from "./components/ContextMenu";
 import "./EditorPage.css";
 
 // Refactored to keep the NEW UI but RESTORE full functionality and branding
@@ -25,7 +29,7 @@ export default function EditorPage() {
   const [language, setLanguage] = useState("javascript");
 
   // --- ROOM & HOST STATE ---
-  const [isConnected, setIsConnected] = useState(false);
+  const [isConnected, setIsConnected] = useState(socket?.connected || false);
   const [isHost, setIsHost] = useState(searchParams.get("host") === "true");
   const [clients, setClients] = useState([]);
   const [joinRequests, setJoinRequests] = useState([]);
@@ -40,6 +44,9 @@ export default function EditorPage() {
   const [showUserList, setShowUserList] = useState(false); // For user list popover
   const [showLanguageDropdown, setShowLanguageDropdown] = useState(false); // For custom dropdown
 
+  // --- CONTEXT MENU STATE ---
+  const [contextMenu, setContextMenu] = useState(null); // { x, y, path, type: 'file'|'folder' }
+
   // Sidebar Toggles
   const [showExplorer, setShowExplorer] = useState(true);
   const [showChat, setShowChat] = useState(true);
@@ -50,16 +57,19 @@ export default function EditorPage() {
   // Removed activeTab state as Activity section is removed
 
   // --- FILES STATE ---
-  const [files, setFiles] = useState({
-    "main.js": { name: "main.js", language: "javascript", content: "// Write your JavaScript code here\nconsole.log('Hello World!');" },
-    "styles.css": { name: "styles.css", language: "css", content: "/* Add your CSS styles here */\nbody {\n  background: #f0f0f0;\n}" }
-  });
-  const [activeFile, setActiveFile] = useState("main.js");
+  const [files, setFiles] = useState({});
+  const [activeFile, setActiveFile] = useState(null);
+  const [openFiles, setOpenFiles] = useState([]); // Track open files for tabs
   const [expandedFolders, setExpandedFolders] = useState({}); // Track expanded specific folders by path string
+
+  // --- WORKSPACE STATE ---
+  const [workspacePath, setWorkspacePath] = useState(null);
+  const [explorerMode, setExplorerMode] = useState('room'); // 'room' | 'workspace'
+  const [workspaceActiveFile, setWorkspaceActiveFile] = useState(null);
 
   // --- TERMINAL STATE ---
   const [activeTerminalTab, setActiveTerminalTab] = useState('terminal'); // 'terminal', 'debug', 'output'
-  const [terminalHeight, setTerminalHeight] = useState(192); // Default 192px (~48 tailwind unit)
+  const [terminalHeight, setTerminalHeight] = useState(250); // Slightly larger for real terminal
   const [showTerminal, setShowTerminal] = useState(true);
   const isResizingTerminal = useRef(false);
 
@@ -209,6 +219,12 @@ export default function EditorPage() {
     if (!file || file.isFolder) {
       return;
     }
+
+    // Add to open files if not already present
+    if (!openFiles.includes(fileName)) {
+      setOpenFiles(prev => [...prev, fileName]);
+    }
+
     setActiveFile(fileName);
     setLanguage(file.language || 'plaintext');
     setCode(file.content || '');
@@ -216,14 +232,43 @@ export default function EditorPage() {
     // For now, this updates the local editor view.
   };
 
+  const closeFile = (e, fileName) => {
+    e.stopPropagation(); // Prevent switching to file when closing
+
+    const newOpenFiles = openFiles.filter(f => f !== fileName);
+    setOpenFiles(newOpenFiles);
+
+    // If we closed the active file, switch to another one
+    if (activeFile === fileName) {
+      if (newOpenFiles.length > 0) {
+        // Switch to the last opened file or the one before the closed one
+        const lastFile = newOpenFiles[newOpenFiles.length - 1];
+        handleFileSwitch(lastFile);
+      } else {
+        setActiveFile(null);
+        setCode("");
+      }
+    }
+  };
+
   // Run Code
   const handleRunCode = async () => {
-    if (!code.trim()) return;
+    if (!code || !language) return;
+
+    // Open terminal if closed
+    if (!showTerminal) setShowTerminal(true);
+
     setIsRunning(true);
-    // Explicitly set 'Compiling...' first
-    setOutput(["Compiling..."]);
+
+    // Helper to write to the active terminal
+    const writeToTerm = (text) => {
+      window.dispatchEvent(new CustomEvent('terminal:run-output', { detail: text }));
+    };
 
     try {
+      const langName = programmingLanguages.find(l => l.id === language)?.name || language;
+      writeToTerm(`\n\x1b[1;36m━━━ Running ${langName} ━━━\x1b[0m\n`);
+
       const response = await fetch("http://localhost:3001/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -232,13 +277,19 @@ export default function EditorPage() {
       const result = await response.json();
 
       if (result.success) {
-        setOutput((result.output || "✓ Code executed successfully").split('\n'));
+        const output = result.output || '(no output)';
+        writeToTerm(output);
+        if (result.stderr) {
+          writeToTerm(`\x1b[33m${result.stderr}\x1b[0m`);
+        }
+        writeToTerm(`\x1b[1;32m\n✓ Done\x1b[0m\n`);
       } else {
-        // Enhanced Error Display logic from EnhancedTerminal will be in render
-        setOutput((result.error || "Unknown Error").split('\n'));
+        const error = result.error || 'Unknown Error';
+        writeToTerm(`\x1b[1;31m${error}\x1b[0m\n`);
+        writeToTerm(`\x1b[1;31m✗ Exited with error\x1b[0m\n`);
       }
     } catch (error) {
-      setOutput([`✗ Error: ${error.message}`]);
+      writeToTerm(`\x1b[1;31mError: ${error.message}\x1b[0m\n`);
     }
     setIsRunning(false);
   };
@@ -327,11 +378,13 @@ export default function EditorPage() {
   const createNewFile = () => {
     const fileName = prompt("Enter file name (e.g., script.js):");
     if (fileName && !files[fileName]) {
+      const lang = getLanguageFromExtension(fileName);
       setFiles(prev => ({
         ...prev,
-        [fileName]: { name: fileName, language: fileName.split('.').pop() || 'txt', content: "" }
+        [fileName]: { name: fileName, language: lang, content: "" }
       }));
       setActiveFile(fileName);
+      setLanguage(lang); // Also set current editor language immediately
     }
   };
 
@@ -423,14 +476,22 @@ export default function EditorPage() {
   // Open folder using native File System Access API
   const openFolder = async () => {
     try {
-      // Check if the API is supported
+      // Check if the File System Access API is available
       if (!('showDirectoryPicker' in window)) {
         alert('Your browser does not support opening local folders. Please use Chrome, Edge, or another Chromium-based browser.');
         return;
       }
 
-      // Open native folder picker dialog
-      const dirHandle = await window.showDirectoryPicker();
+      let dirHandle;
+      try {
+        // Open native folder picker dialog
+        dirHandle = await window.showDirectoryPicker();
+      } catch (err) {
+        if (err.name === 'AbortError') return; // User cancelled
+        // Brave or other browsers may block this API
+        alert('Could not open folder picker. If you\'re using Brave, try disabling Shields for this site, or use Chrome instead.');
+        return;
+      }
 
       // Recursively read all files from the selected folder
       const newFiles = {};
@@ -442,10 +503,19 @@ export default function EditorPage() {
       // Expand the root folder
       setExpandedFolders(prev => ({ ...prev, [dirHandle.name + '/']: true }));
 
-      // If there are files, open the first one
-      const firstFile = Object.keys(newFiles).find(key => !newFiles[key].isFolder);
-      if (firstFile) {
-        handleFileSwitch(firstFile);
+      // Reset open files (don't open everything automatically)
+      setOpenFiles([]);
+      setActiveFile(null);
+      setCode("");
+
+      // Try to open README.md or package.json if they exist, otherwise nothing
+      const readmePath = Object.keys(newFiles).find(path => path.toLowerCase().endsWith('readme.md'));
+      const pkgJsonPath = Object.keys(newFiles).find(path => path.endsWith('package.json'));
+
+      if (readmePath) {
+        handleFileSwitch(readmePath);
+      } else if (pkgJsonPath) {
+        handleFileSwitch(pkgJsonPath);
       }
 
     } catch (err) {
@@ -489,6 +559,40 @@ export default function EditorPage() {
     return tree;
   };
 
+  const getFileIcon = (filename) => {
+    if (!filename) return <span className="material-icons-round text-[18px] text-slate-400">insert_drive_file</span>;
+    const ext = filename.split('.').pop().toLowerCase();
+    switch (ext) {
+      case 'js':
+      case 'jsx':
+        return <span className="material-icons-round text-[18px] text-amber-400">javascript</span>;
+      case 'ts':
+      case 'tsx':
+        return <span className="text-[10px] font-bold text-blue-500 w-[18px] text-center">TS</span>;
+      case 'css':
+        return <span className="material-icons-round text-[18px] text-indigo-400">css</span>;
+      case 'html':
+        return <span className="material-icons-round text-[18px] text-orange-500">html</span>;
+      case 'json':
+        return <span className="material-icons-round text-[18px] text-green-500">data_object</span>;
+      case 'py':
+        return <span className="text-[10px] font-bold text-blue-400 w-[18px] text-center">PY</span>;
+      case 'java':
+        return <span className="material-icons-round text-[18px] text-red-500">coffee</span>;
+      case 'cpp':
+      case 'c':
+        return <span className="text-[10px] font-bold text-blue-600 w-[18px] text-center">C++</span>;
+      case 'cs':
+        return <span className="text-[10px] font-bold text-purple-600 w-[18px] text-center">C#</span>;
+      case 'md':
+        return <span className="material-icons-round text-[18px] text-slate-400">info</span>;
+      case 'txt':
+        return <span className="material-icons-round text-[18px] text-slate-400">description</span>;
+      default:
+        return <span className="material-icons-round text-[18px] text-slate-400">insert_drive_file</span>;
+    }
+  };
+
   const FileTreeNode = ({ node, name, fullPath, level = 0 }) => {
     const isFolder = !node.__fileData || node.__fileData.isFolder;
     const isExpanded = expandedFolders[fullPath] || false;
@@ -509,9 +613,10 @@ export default function EditorPage() {
             className="flex items-center gap-1.5 px-2 py-1 text-slate-600 dark:text-slate-300 cursor-pointer hover:bg-slate-200/50 dark:hover:bg-slate-800 rounded-technical select-none transition-colors"
             style={{ paddingLeft: `${indentWith + 8}px` }}
             onClick={() => toggleFolder(fullPath)}
+            onContextMenu={(e) => handleContextMenu(e, fullPath, 'folder')}
           >
-            <span className={`material-icons-round text-[18px] text-slate-400 transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`}>chevron_right</span>
-            <span className="material-icons-round text-[16px] text-amber-500/80">{isExpanded ? 'folder_open' : 'folder'}</span>
+            <span className={`material-icons-round text-[20px] text-slate-400 transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`}>chevron_right</span>
+            <span className="material-icons-round text-[18px] text-amber-500/80">{isExpanded ? 'folder_open' : 'folder'}</span>
             <span className="text-sm font-medium truncate">{name}</span>
           </div>
 
@@ -538,12 +643,11 @@ export default function EditorPage() {
       return (
         <div
           onClick={() => handleFileSwitch(fullPath)}
+          onContextMenu={(e) => handleContextMenu(e, fullPath, 'file')}
           className={`flex items-center gap-2 px-2 py-1 cursor-pointer rounded-technical transition-colors ${isActive ? 'bg-white dark:bg-slate-800 text-primary shadow-sm border border-border-main dark:border-slate-700' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800'}`}
           style={{ marginLeft: `${indentWith + 12}px` }}
         >
-          <span className={`material-icons-round text-[16px] ${file.language === 'css' ? 'text-indigo-400' : 'text-amber-400'}`}>
-            {file.language === 'css' ? 'css' : 'javascript'}
-          </span>
+          {getFileIcon(file?.name || name)}
           <span className={`text-sm truncate ${isActive ? 'font-semibold' : 'font-medium'}`}>{name}</span>
         </div>
       );
@@ -583,6 +687,169 @@ export default function EditorPage() {
     setJoinRequests(prev => prev.filter(r => r.socketId !== request.socketId));
   };
 
+  // --- CONTEXT MENU LOGIC ---
+  const handleContextMenu = (e, path, type) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      path,
+      type
+    });
+  };
+
+  const handleMenuAction = (action) => {
+    if (!contextMenu) return;
+    const { path, type } = contextMenu;
+
+    switch (action) {
+      case 'newFile': {
+        const fileName = window.prompt("Enter file name:");
+        if (fileName) {
+          // If path is a folder, add to it. If file, add to parent.
+          let parentPath = path;
+          if (type === 'file') {
+            const parts = path.split('/');
+            parts.pop();
+            parentPath = parts.join('/') + '/';
+          }
+          if (parentPath === '/') parentPath = ''; // Root
+
+          const newFilePath = parentPath + fileName;
+          if (!files[newFilePath]) {
+            setFiles(prev => ({
+              ...prev,
+              [newFilePath]: { name: fileName, language: fileName.split('.').pop() || 'txt', content: "" }
+            }));
+            setActiveFile(newFilePath);
+            // Ensure parent folder is expanded
+            setExpandedFolders(prev => ({ ...prev, [parentPath]: true }));
+          }
+        }
+        break;
+      }
+      case 'newFolder': {
+        const folderName = window.prompt("Enter folder name:");
+        if (folderName) {
+          let parentPath = path;
+          if (type === 'file') {
+            const parts = path.split('/');
+            parts.pop();
+            parentPath = parts.join('/') + '/';
+          }
+          if (parentPath === '/') parentPath = '';
+
+          const newFolderPath = parentPath + folderName + "/";
+          if (!files[newFolderPath]) {
+            setFiles(prev => ({
+              ...prev,
+              [newFolderPath]: { name: folderName, path: newFolderPath, isFolder: true }
+            }));
+            setExpandedFolders(prev => ({ ...prev, [newFolderPath]: true, [parentPath]: true }));
+          }
+        }
+        break;
+      }
+      case 'revealInFinder':
+        alert("Not available in web version");
+        break;
+      case 'openInTerminal':
+        setShowTerminal(true);
+        break;
+      case 'copyPath':
+        navigator.clipboard.writeText(path);
+        break;
+      case 'copyRelativePath':
+        // Simplified for now, just the path key
+        navigator.clipboard.writeText(path);
+        break;
+      case 'rename': {
+        const oldName = path.split('/').filter(Boolean).pop();
+        const newName = window.prompt("Enter new name:", oldName);
+        if (newName && newName !== oldName) {
+          // Calculate new path based on type
+          let parentPath = '';
+          const parts = path.split('/');
+          if (type === 'folder') {
+            // Remove trailing slash and current name
+            parts.pop(); // ''
+            parts.pop(); // name
+          } else {
+            // Remove name
+            parts.pop();
+          }
+          parentPath = parts.join('/') + (parts.length > 0 ? '/' : '');
+
+          const newPath = parentPath + newName + (type === 'folder' ? '/' : '');
+
+          if (files[newPath]) {
+            alert('A file or folder with this name already exists.');
+            break;
+          }
+
+          const newFiles = { ...files };
+          const newExpanded = { ...expandedFolders };
+          let newActive = activeFile;
+          let newOpened = [...openFiles];
+
+          // Rename target and all children
+          Object.keys(files).forEach(key => {
+            if (key === path || key.startsWith(path)) {
+              const suffix = key.slice(path.length);
+              const newKey = newPath + suffix;
+
+              newFiles[newKey] = { ...newFiles[key], path: newKey };
+              if (key === path) {
+                newFiles[newKey].name = newName;
+              }
+              delete newFiles[key];
+
+              // Update expanded state
+              if (newExpanded[key]) {
+                newExpanded[newKey] = newExpanded[key];
+                delete newExpanded[key];
+              }
+
+              // Update active file
+              if (activeFile === key) {
+                newActive = newKey;
+              }
+
+              // Update open files
+              const openIndex = newOpened.indexOf(key);
+              if (openIndex !== -1) {
+                newOpened[openIndex] = newKey;
+              }
+            }
+          });
+
+          setFiles(newFiles);
+          setExpandedFolders(newExpanded);
+          setActiveFile(newActive);
+          setOpenFiles(newOpened);
+        }
+        break;
+      }
+      case 'delete': {
+        if (window.confirm(`Are you sure you want to delete ${path}?`)) {
+          const newFiles = { ...files };
+          delete newFiles[path];
+          // Also delete children if folder - simple prefix match
+          Object.keys(newFiles).forEach(k => {
+            if (k.startsWith(path)) delete newFiles[k];
+          });
+          setFiles(newFiles);
+          if (activeFile === path) setActiveFile(null);
+        }
+        break;
+      }
+      default:
+        console.log("Action:", action, path);
+    }
+    setContextMenu(null);
+  };
+
 
   return (
     <div className="bg-white font-display text-slate-900 h-screen flex flex-col overflow-hidden selection:bg-indigo-100 dark:bg-slate-900 dark:text-slate-100">
@@ -597,6 +864,16 @@ export default function EditorPage() {
       )}
       {showInviteModal && <InviteModal roomId={roomId} clients={clients} onClose={() => setShowInviteModal(false)} />}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          targetName={contextMenu.path}
+          targetType={contextMenu.type}
+          onClose={() => setContextMenu(null)}
+          onAction={handleMenuAction}
+        />
+      )}
 
       <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" multiple webkitdirectory="" mozdirectory="" />
 
@@ -622,10 +899,10 @@ export default function EditorPage() {
 
           <div className="h-4 w-[1px] bg-border-main dark:bg-slate-800"></div>
 
-          <div className="flex items-center gap-2 font-mono text-[11px] text-slate-500 dark:text-slate-400 bg-sidebar-bg dark:bg-slate-800 px-2 py-1 border border-border-main dark:border-slate-700 rounded-technical">
+          <div className="flex items-center gap-2 font-mono text-xs text-slate-500 dark:text-slate-400 bg-sidebar-bg dark:bg-slate-800 px-2 py-1 border border-border-main dark:border-slate-700 rounded-technical">
             <span>#{roomId}</span>
             <button onClick={copyRoomId} className="hover:text-primary transition-colors flex items-center" title="Copy Room ID">
-              <span className="material-symbols-outlined text-[14px]">content_copy</span>
+              <span className="material-symbols-outlined text-[16px]">content_copy</span>
             </button>
           </div>
         </div>
@@ -636,7 +913,7 @@ export default function EditorPage() {
             {clients.slice(0, 3).map((c, i) => (
               <div
                 key={i}
-                className="size-7 rounded-technical border border-border-main dark:border-slate-700 flex items-center justify-center text-white text-[10px] font-bold"
+                className="size-8 rounded-technical border border-border-main dark:border-slate-700 flex items-center justify-center text-white text-xs font-bold"
                 style={{ backgroundColor: c.color }}
                 title={c.username}
               >
@@ -646,7 +923,7 @@ export default function EditorPage() {
             {clients.length > 3 && (
               <button
                 onClick={() => setShowUserList(!showUserList)}
-                className="size-7 rounded-technical border border-border-main dark:border-slate-700 bg-slate-50 dark:bg-slate-800 flex items-center justify-center text-[10px] font-bold text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors z-10"
+                className="size-8 rounded-technical border border-border-main dark:border-slate-700 bg-slate-50 dark:bg-slate-800 flex items-center justify-center text-xs font-bold text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors z-10"
               >
                 +{clients.length - 3}
               </button>
@@ -655,7 +932,7 @@ export default function EditorPage() {
             {/* User List Popover */}
             {showUserList && (
               <div className="absolute top-8 right-0 w-48 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl z-50 p-2 animate-scaleIn">
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest px-2 py-1 mb-1">Participants</div>
+                <div className="text-xs font-bold text-slate-400 uppercase tracking-widest px-2 py-1 mb-1">Participants</div>
                 {clients.map((c, i) => (
                   <div key={i} className="flex items-center gap-2 p-2 hover:bg-slate-50 dark:hover:bg-slate-700/50 rounded-lg transition-colors">
                     <div className="size-6 rounded-full flex items-center justify-center text-white text-[9px] font-bold" style={{ backgroundColor: c.color }}>
@@ -671,7 +948,7 @@ export default function EditorPage() {
 
           <button
             onClick={() => setShowInviteModal(true)}
-            className="bg-primary hover:bg-blue-700 text-white px-3 py-1.5 rounded-technical text-xs font-medium transition-colors shadow-sm"
+            className="bg-primary hover:bg-blue-700 text-white px-3 py-1.5 rounded-technical text-sm font-medium transition-colors shadow-sm"
           >
             Share
           </button>
@@ -715,36 +992,69 @@ export default function EditorPage() {
       <main className="flex-1 flex overflow-hidden">
 
         {/* LEFT SIDEBAR (EXPLORER) - Collapsible with Transition */}
-        {/* LEFT SIDEBAR (EXPLORER) - Collapsible with Transition */}
         <aside className={`bg-sidebar-bg dark:bg-slate-950 flex flex-col border-r border-border-main dark:border-slate-800 transition-all duration-300 ease-in-out overflow-hidden flex-shrink-0 ${showExplorer ? 'w-60 opacity-100' : 'w-0 opacity-0 border-r-0'}`}>
-          <div className="w-60 min-w-[15rem] flex flex-col h-full"> {/* Fixed width inner container to prevent squashing */}
-            <div className="p-3 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="material-icons-round text-slate-400 text-sm">folder_open</span>
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Explorer</span>
-              </div>
-              {/* File Actions */}
-              <div className="flex gap-2 text-slate-400">
-                <button onClick={openFolder} className="hover:text-slate-600 dark:hover:text-slate-300 transition-colors" title="Open Folder">
-                  <span className="material-icons-round text-sm">create_new_folder</span>
-                </button>
-                <button onClick={createNewFile} className="hover:text-slate-600 dark:hover:text-slate-300 transition-colors" title="New File">
-                  <span className="material-icons-round text-sm">note_add</span>
-                </button>
-                <button onClick={() => fileInputRef.current?.click()} className="hover:text-slate-600 dark:hover:text-slate-300 transition-colors" title="Upload File/Folder">
-                  <span className="material-icons-round text-sm">upload_file</span>
-                </button>
-              </div>
+          <div className="w-60 min-w-[15rem] flex flex-col h-full">
+            {/* Mode Switch Tabs: Room Files | Local Workspace */}
+            <div className="flex border-b border-border-main dark:border-slate-800 bg-white dark:bg-slate-900">
+              <button
+                onClick={() => setExplorerMode('room')}
+                className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider text-center transition-colors ${explorerMode === 'room' ? 'text-primary border-b-2 border-primary' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
+              >
+                Room Files
+              </button>
+              <button
+                onClick={() => setExplorerMode('workspace')}
+                className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider text-center transition-colors ${explorerMode === 'workspace' ? 'text-primary border-b-2 border-primary' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
+              >
+                Workspace
+              </button>
             </div>
 
-            <nav className="flex-1 overflow-y-auto px-2 mt-2">
-              {renderFileTree()}
-            </nav>
+            {explorerMode === 'room' ? (
+              /* --- ROOM FILES (existing explorer) --- */
+              <>
+                <div className="p-3 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="material-icons-round text-slate-400 text-base">folder_open</span>
+                    <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Explorer</span>
+                  </div>
+                  <div className="flex gap-2 text-slate-400">
+                    <button onClick={openFolder} className="hover:text-slate-600 dark:hover:text-slate-300 transition-colors" title="Open Folder">
+                      <span className="material-icons-round text-base">create_new_folder</span>
+                    </button>
+                    <button onClick={createNewFile} className="hover:text-slate-600 dark:hover:text-slate-300 transition-colors" title="New File">
+                      <span className="material-icons-round text-base">note_add</span>
+                    </button>
+                    <button onClick={() => fileInputRef.current?.click()} className="hover:text-slate-600 dark:hover:text-slate-300 transition-colors" title="Upload File/Folder">
+                      <span className="material-icons-round text-base">upload_file</span>
+                    </button>
+                  </div>
+                </div>
+                <nav className="flex-1 overflow-y-auto px-2 mt-2">
+                  {renderFileTree()}
+                </nav>
+              </>
+            ) : (
+              /* --- LOCAL WORKSPACE (new) --- */
+              <WorkspaceExplorer
+                workspacePath={workspacePath}
+                activeFile={workspaceActiveFile}
+                onWorkspaceChange={(path) => setWorkspacePath(path)}
+                onFileOpen={(file) => {
+                  setWorkspaceActiveFile(file.path);
+                  setCode(file.content);
+                  // Detect language from extension
+                  const ext = file.name.split('.').pop().toLowerCase();
+                  const langMap = { js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', py: 'python', java: 'java', cpp: 'cpp', c: 'c', cs: 'csharp', go: 'go', rs: 'rust', rb: 'ruby', html: 'html', css: 'css', json: 'json', md: 'markdown' };
+                  if (langMap[ext]) setLanguage(langMap[ext]);
+                }}
+              />
+            )}
 
             <div className="p-3 border-t border-border-main dark:border-slate-800 bg-white/40 dark:bg-slate-900/40">
               <div className="flex items-center gap-2">
-                <div className={`size-2 rounded-full ring-2 ring-white dark:ring-slate-900 ${isConnected ? 'bg-emerald-500' : 'bg-red-500'}`}></div>
-                <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">{isConnected ? 'System Online' : 'Reconnecting...'}</span>
+                <div className={`size-2.5 rounded-full ring-2 ring-white dark:ring-900 ${isConnected ? 'bg-emerald-500' : 'bg-red-500'}`}></div>
+                <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">{isConnected ? 'System Online' : 'Reconnecting...'}</span>
               </div>
             </div>
           </div>
@@ -757,40 +1067,50 @@ export default function EditorPage() {
           {/* Editor Tabs / Breadcrumbs */}
           <div className="flex items-center bg-sidebar-bg dark:bg-slate-950 h-9 border-b border-border-main dark:border-slate-800">
             <div className="flex h-full">
-              {Object.entries(files)
-                .filter(([path, file]) => !file.isFolder) // Only show files, not folders
-                .slice(0, 10) // Limit to 10 tabs to prevent overflow
-                .map(([path, file]) => (
+              {openFiles.map(path => {
+                const file = files[path];
+                if (!file) return null; // Safety check
+
+                return (
                   <div
                     key={path}
                     onClick={() => handleFileSwitch(path)}
-                    className={`flex items-center gap-2 px-3 border-r border-border-main dark:border-slate-800 text-[11px] cursor-pointer transition-colors ${activeFile === path ? 'bg-white dark:bg-slate-900 font-semibold text-slate-700 dark:text-slate-200 border-t-2 border-t-primary' : 'font-medium text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                    className={`flex items-center gap-2 px-3 border-r border-border-main dark:border-slate-800 text-xs cursor-pointer transition-colors ${activeFile === path ? 'bg-white dark:bg-slate-900 font-semibold text-slate-700 dark:text-slate-200 border-t-2 border-t-primary' : 'font-medium text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
                   >
-                    <span className={`material-icons-round text-[14px] ${activeFile === path ? 'text-primary' : ''}`}>description</span>
+                    <span className={`material-icons-round text-[16px] ${activeFile === path ? 'text-primary' : ''}`}>description</span>
                     {file.name}
-                    {activeFile === path && (
-                      <span className="material-icons-round text-[14px] cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800 rounded p-0.5 ml-1">close</span>
-                    )}
+                    <span
+                      onClick={(e) => closeFile(e, path)}
+                      className="material-icons-round text-[16px] cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-700 rounded p-0.5 ml-1 transition-colors"
+                    >
+                      close
+                    </span>
                   </div>
-                ))}
+                );
+              })}
             </div>
             <div className="flex-1 px-4 flex items-center justify-between">
-              <div className="flex items-center gap-2 text-[10px] text-slate-400 font-mono">
-                <span>src</span>
-                <span>/</span>
-                <span>components</span>
-                <span>/</span>
-                <span className="text-slate-600 dark:text-slate-300 font-bold">{activeFile}</span>
+              <div className="flex items-center gap-1 text-xs text-slate-400 font-mono">
+                {activeFile ? (
+                  activeFile.split('/').map((part, i, arr) => (
+                    <span key={i} className="flex items-center gap-1">
+                      {i > 0 && <span>/</span>}
+                      <span className={i === arr.length - 1 ? 'text-slate-600 dark:text-slate-300 font-bold' : ''}>{part}</span>
+                    </span>
+                  ))
+                ) : (
+                  <span className="italic text-slate-400">No file selected</span>
+                )}
               </div>
 
               {/* Custom Language Dropdown */}
               <div className="relative">
                 <button
                   onClick={() => setShowLanguageDropdown(!showLanguageDropdown)}
-                  className="flex items-center gap-2 text-[10px] font-bold text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-2 py-1 rounded-lg hover:border-primary transition-colors uppercase tracking-wider"
+                  className="flex items-center gap-2 text-xs font-bold text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-2 py-1.5 rounded-lg hover:border-primary transition-colors uppercase tracking-wider"
                 >
                   {programmingLanguages.find(l => l.id === language)?.name}
-                  <span className="material-icons-round text-[14px] text-slate-400">expand_more</span>
+                  <span className="material-icons-round text-[16px] text-slate-400">expand_more</span>
                 </button>
 
                 {showLanguageDropdown && (
@@ -813,11 +1133,34 @@ export default function EditorPage() {
                 {/* Overlay to close */}
                 {showLanguageDropdown && <div className="fixed inset-0 z-40" onClick={() => setShowLanguageDropdown(false)}></div>}
               </div>
+
+              {/* Run Button */}
+              <button
+                onClick={handleRunCode}
+                disabled={isRunning || !code || !activeFile}
+                className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg transition-all ${isRunning
+                  ? 'bg-gray-400 text-white cursor-not-allowed'
+                  : 'bg-green-500 hover:bg-green-600 text-white shadow-sm hover:shadow-md'
+                  }`}
+                title="Run Code"
+              >
+                <span className="material-icons-round text-[16px]">
+                  {isRunning ? 'hourglass_empty' : 'play_arrow'}
+                </span>
+                {isRunning ? 'Running...' : 'Run'}
+              </button>
             </div>
           </div>
 
           {/* Monaco Editor Wrapper */}
           <div className="flex-1 overflow-hidden relative">
+            {!activeFile && (
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-white/80 dark:bg-slate-900/90 backdrop-blur-sm">
+                <span className="material-icons-round text-[48px] text-slate-300 dark:text-slate-600 mb-3">note_add</span>
+                <p className="text-sm font-medium text-slate-400 dark:text-slate-500">No file open</p>
+                <p className="text-xs text-slate-400 dark:text-slate-600 mt-1">Create or select a file from the Explorer to start coding</p>
+              </div>
+            )}
             <Editor
               height="100%"
               language={language}
@@ -825,8 +1168,8 @@ export default function EditorPage() {
               theme={theme === "light" ? "light" : "vs-dark"}
               onChange={handleChange}
               options={{
-                minimap: { enabled: false }, // Clean look
-                fontSize: 14,
+                minimap: { enabled: false },
+                fontSize: 16,
                 fontFamily: "'JetBrains Mono', monospace",
                 lineHeight: 22,
                 padding: { top: 16 },
@@ -838,6 +1181,7 @@ export default function EditorPage() {
                 renderLineHighlight: "line",
                 lineNumbers: "on",
                 folding: true,
+                readOnly: !activeFile,
               }}
             />
           </div>
@@ -855,66 +1199,11 @@ export default function EditorPage() {
               >
                 <div className="mx-auto w-12 h-full bg-transparent group-hover:bg-primary rounded-full transition-colors"></div>
               </div>
-              <div className="flex items-center justify-between px-4 py-2 border-b border-border-main dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/50">
-                <div className="flex gap-4">
-                  <button
-                    onClick={() => setActiveTerminalTab('terminal')}
-                    className={`text-[10px] font-bold pb-1 transition-colors uppercase tracking-wider ${activeTerminalTab === 'terminal' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}
-                  >
-                    Console
-                  </button>
-                  <button
-                    onClick={() => setActiveTerminalTab('output')}
-                    className={`text-[10px] font-bold pb-1 transition-colors uppercase tracking-wider ${activeTerminalTab === 'output' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}
-                  >
-                    Output
-                  </button>
-                  <button
-                    onClick={() => setActiveTerminalTab('debug')}
-                    className={`text-[10px] font-bold pb-1 transition-colors uppercase tracking-wider ${activeTerminalTab === 'debug' ? 'text-primary border-b-2 border-primary' : 'text-slate-400'}`}
-                  >
-                    Debug
-                  </button>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button onClick={() => setOutput([])} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200" title="Clear">
-                    <span className="material-symbols-outlined text-[16px]">block</span>
-                  </button>
-
-                  {/* Run Button (Restored Position) */}
-                  <button
-                    onClick={handleRunCode}
-                    className="bg-emerald-500 hover:bg-emerald-600 text-white flex items-center gap-1.5 px-3 py-1.5 rounded-technical text-[10px] font-bold transition-all shadow-sm active:scale-95"
-                  >
-                    <span className="material-symbols-outlined text-[14px]">{isRunning ? 'sync' : 'play_arrow'}</span>
-                    {isRunning ? 'RUNNING...' : 'RUN'}
-                  </button>
-
-                  {/* Close Button */}
-                  <button onClick={() => setShowTerminal(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 ml-2" title="Close Terminal">
-                    <span className="material-symbols-outlined text-[18px]">close</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Real Terminal Output Logic */}
-              <div className="flex-1 p-4 font-mono text-[13px] text-slate-600 dark:text-slate-300 overflow-y-auto space-y-1">
-                {output.length === 0 ? (
-                  <>
-                    <p className="text-slate-400 italic">// Console output will appear here...</p>
-                    <p className="text-slate-400 cursor-blink border-l-2 border-transparent pl-0.5">&gt; _</p>
-                  </>
-                ) : (
-                  output.map((line, i) => {
-                    // Basic parsing for colors
-                    let className = "whitespace-pre-wrap";
-                    if (line.toLowerCase().includes("error")) className += " text-red-500 font-bold";
-                    else if (line.toLowerCase().includes("success")) className += " text-emerald-600 font-bold";
-                    else if (line.toLowerCase().includes("warn")) className += " text-amber-500";
-                    return <p key={i} className={className}>{line}</p>;
-                  })
-                )}
-              </div>
+              <TerminalTabs
+                socket={socket}
+                onClose={() => setShowTerminal(false)}
+                workspacePath={workspacePath}
+              />
             </div>
           )}
         </section>
@@ -922,18 +1211,13 @@ export default function EditorPage() {
 
         {/* RIGHT SIDEBAR (CHAT) - Collapsible with Transition */}
         <aside
-          className={`bg-sidebar-bg dark:bg-slate-950 border-l border-border-main dark:border-slate-800 flex flex-col transition-all duration-300 ease-in-out overflow-hidden flex-shrink-0`}
-          style={{
-            width: showChat ? '288px' : '0px',
-            opacity: showChat ? 1 : 0,
-            borderLeftWidth: showChat ? '1px' : '0px'
-          }}
+          className={`bg-sidebar-bg dark:bg-slate-950 border-l border-border-main dark:border-slate-800 flex flex-col transition-all duration-300 ease-in-out overflow-hidden flex-shrink-0 ${showChat ? 'w-72' : 'w-0 border-l-0'}`}
         >
-          <div className="w-72 min-w-[18rem] flex flex-col h-full"> {/* Fixed width inner container */}
+          <div className={`w-72 flex flex-col h-full ${showChat ? 'opacity-100' : 'opacity-0'}`}> {/* Inner container */}
             {/* Chat Header - No Tabs */}
             <div className="flex border-b border-border-main dark:border-slate-800 bg-white dark:bg-slate-900 border-t border-t-transparent">
               <div
-                className="flex-1 p-3 text-center text-[11px] font-bold uppercase tracking-widest text-primary border-b-2 border-primary"
+                className="flex-1 p-3 text-center text-xs font-bold uppercase tracking-widest text-primary border-b-2 border-primary"
               >
                 Team Chat
               </div>
@@ -952,12 +1236,12 @@ export default function EditorPage() {
                   ) : (
                     <>
                       <div className="flex items-center gap-2">
-                        <span className={`text-[10px] font-bold ${msg.isMe ? 'text-primary' : 'text-slate-600 dark:text-slate-300'}`}>
+                        <span className={`text-xs font-bold ${msg.isMe ? 'text-primary' : 'text-slate-600 dark:text-slate-300'}`}>
                           {msg.username}
                         </span>
-                        <span className="text-[9px] text-slate-400">{msg.time || 'Just now'}</span>
+                        <span className="text-[10px] text-slate-400">{msg.time || 'Just now'}</span>
                       </div>
-                      <div className={`p-2.5 rounded-technical border-l-2 text-[12px] leading-snug shadow-sm ${msg.isMe ? 'bg-indigo-50 dark:bg-indigo-900/20 text-slate-700 dark:text-slate-200 border-primary' : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-300 dark:border-slate-600'}`}>
+                      <div className={`p-2.5 rounded-technical border-l-2 text-sm leading-snug shadow-sm ${msg.isMe ? 'bg-indigo-50 dark:bg-indigo-900/20 text-slate-700 dark:text-slate-200 border-primary' : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-300 dark:border-slate-600'}`}>
                         {msg.text}
                       </div>
                     </>
@@ -973,7 +1257,7 @@ export default function EditorPage() {
                 <input
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-border-main dark:border-slate-700 rounded-technical text-[12px] px-3 py-2 focus:ring-0 focus:border-primary outline-none transition-all placeholder:text-slate-400 dark:text-white"
+                  className="w-full bg-slate-50 dark:bg-slate-800 border border-border-main dark:border-slate-700 rounded-technical text-sm px-3 py-2 focus:ring-0 focus:border-primary outline-none transition-all placeholder:text-slate-400 dark:text-white"
                   placeholder="Type a message..."
                   type="text"
                 />
@@ -995,6 +1279,6 @@ export default function EditorPage() {
         </button>
       </div>
 
-    </div>
+    </div >
   );
 }

@@ -8,6 +8,7 @@ const connectDB = require("./Config/db");
 const socketHandler = require("./Socket");
 const { executeCode, LANGUAGES } = require("./CodeRunner");
 const authRoutes = require("./Routes/authRoutes");
+const fileRoutes = require("./Routes/FileRoutes");
 
 const app = express();
 app.use(cors());
@@ -15,6 +16,9 @@ app.use(express.json({ limit: '1mb' }));
 
 // Auth routes
 app.use("/api/auth", authRoutes);
+
+// Workspace file routes
+app.use("/api/workspace", fileRoutes);
 
 // Code execution endpoint
 app.post("/execute", async (req, res) => {

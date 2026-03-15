@@ -1,4 +1,9 @@
 const Room = require("./Models/Room");
+const { initTerminalHandlers } = require("./TerminalService");
+const fs = require('fs');
+const path = require('path');
+
+const WORKSPACE_DIR = path.join(__dirname, 'workspace');
 
 const inMemoryRooms = new Map();
 
@@ -15,6 +20,22 @@ function generateRoomId() {
 function socketHandler(io, dbConnected) {
   io.on("connection", (socket) => {
     console.log("User connected:", socket.id);
+
+    // Initialize Terminal handlers for this socket (node-pty based)
+    initTerminalHandlers(socket, io);
+
+    // === FILE SYNC ===
+    socket.on('file:save', ({ filename, content }) => {
+      try {
+        // Basic security: prevent traversing up
+        const safeName = path.basename(filename);
+        const filepath = path.join(WORKSPACE_DIR, safeName);
+        fs.writeFileSync(filepath, content);
+        console.log(`[File] Saved ${safeName} to workspace`);
+      } catch (e) {
+        console.error(`[File] Error saving ${filename}:`, e.message);
+      }
+    });
 
     // === ROOM CREATION (Host Only) ===
     socket.on("create_room", async ({ userId, userName }) => {

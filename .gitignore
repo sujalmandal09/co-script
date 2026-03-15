@@ -40,3 +40,7 @@ build/
 # Testing
 coverage/
 .nyc_output/
+
+# UML Diagrams
+*.png
+
